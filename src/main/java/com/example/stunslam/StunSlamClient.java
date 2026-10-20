@@ -53,19 +53,21 @@ public class StunSlamClient implements ClientModInitializer {
     }
 
     // ------------------------------------------------------------------
-    // Logic: click on a shield -> axe hit -> swap to mace -> slam
+    // Logic: click on a shield -> axe hit -> (next tick) mace swap + slam
     // ------------------------------------------------------------------
     static final class StunSlamLogic {
         private static final float MIN_FALL = 1.5f;
-        private static final int AXE_HOLD = 3;    // ticks you see the axe before swapping to mace
-        private static final int MACE_HOLD = 2;   // ticks you see the mace before the slam
+        // Extra ticks to show the axe before swapping to the mace (20 ticks = 1 second).
+        // Keep this at 0 or 1: longer delays let you land, which cancels the smash.
+        private static final int AXE_HOLD = 0;
         private static final int MAX_TICKS = 40;  // combo always gives up after this
 
         private static boolean busy = false;      // true while WE are attacking
-        private static int step = 0;              // 0 idle, 1 swap to mace, 2 slam, 3 restore slot
+        private static int step = 0;              // 0 idle, 1 mace swap + slam, 2 waiting to fall, 3 restore slot
         private static int wait = 0;
         private static int timeout = 0;
         private static int prevSlot = 0;
+        private static boolean wasFalling = false;
         private static Player target = null;
 
         private StunSlamLogic() {}
@@ -75,6 +77,7 @@ public class StunSlamClient implements ClientModInitializer {
             wait = 0;
             timeout = 0;
             target = null;
+            wasFalling = false;
             busy = false;
         }
 
@@ -107,8 +110,9 @@ public class StunSlamClient implements ClientModInitializer {
             int maceSlot = findHotbar(me, false);
 
             prevSlot = me.getInventory().getSelectedSlot();
+            wasFalling = canSlam(me);   // remember if we were falling at the moment of the click
 
-            // 1) axe hit
+            // 1) axe hit right now
             select(me, axeSlot);
             busy = true;
             try {
@@ -126,7 +130,7 @@ public class StunSlamClient implements ClientModInitializer {
             return InteractionResult.FAIL;
         }
 
-        // ---- steps 2 and 3 run on later ticks so the swaps are visible ----
+        // ---- the follow-up runs on the next tick ----
         static void tick(Minecraft mc) {
             LocalPlayer me = mc.player;
             if (me == null || mc.level == null || mc.gameMode == null || !enabled || mc.screen != null) {
@@ -163,21 +167,30 @@ public class StunSlamClient implements ClientModInitializer {
                     reset();
                     return;
                 }
+                // 2) swap to mace and 3) slam in the same tick (swap packet goes out first)
                 select(me, maceSlot);
-                step = 2;
-                wait = MACE_HOLD;
+                if (wasFalling || canSlam(me)) {
+                    slam(mc, me, t);
+                    reset();
+                } else {
+                    step = 2; // not falling yet: hold the mace and wait
+                }
                 return;
             }
 
             if (step == 2) {
-                if (!canSlam(me)) return; // keep waiting until we are falling far enough
-                busy = true;
-                try {
-                    attack(mc, me, t);
-                } finally {
-                    busy = false;
-                }
+                if (!canSlam(me)) return;
+                slam(mc, me, t);
                 reset();
+            }
+        }
+
+        private static void slam(Minecraft mc, LocalPlayer me, Player t) {
+            busy = true;
+            try {
+                attack(mc, me, t);
+            } finally {
+                busy = false;
             }
         }
 
