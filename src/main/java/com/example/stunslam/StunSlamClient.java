@@ -53,32 +53,30 @@ public class StunSlamClient implements ClientModInitializer {
     }
 
     // ------------------------------------------------------------------
-    // Logic: click on a shield -> axe hit -> (next tick) mace swap + slam
+    // Logic: click on a shield -> axe hit -> mace swap -> slam, ALL in one tick
     // ------------------------------------------------------------------
     static final class StunSlamLogic {
         private static final float MIN_FALL = 1.5f;
-        // Extra ticks to show the axe before swapping to the mace (20 ticks = 1 second).
-        // Keep this at 0 or 1: longer delays let you land, which cancels the smash.
-        private static final int AXE_HOLD = 0;
-        private static final int MAX_TICKS = 40;  // combo always gives up after this
+        private static final int MAX_WAIT = 20;   // ticks to wait for a valid fall
 
         private static boolean busy = false;      // true while WE are attacking
-        private static int step = 0;              // 0 idle, 1 mace swap + slam, 2 waiting to fall, 3 restore slot
-        private static int wait = 0;
-        private static int timeout = 0;
-        private static int prevSlot = 0;
-        private static boolean wasFalling = false;
-        private static Player target = null;
+        private static int waitTicks = 0;         // >0: holding mace, waiting to fall far enough
+        private static Player waitTarget = null;
+        private static int waitPrevSlot = -1;
+        private static int restoreSlot = -1;      // slot to go back to on the next tick
 
         private StunSlamLogic() {}
 
-        private static void reset() {
-            step = 0;
-            wait = 0;
-            timeout = 0;
-            target = null;
-            wasFalling = false;
+        private static void log(String s) {
+            System.out.println("[StunSlam] " + s);
+        }
+
+        private static void clear() {
             busy = false;
+            waitTicks = 0;
+            waitTarget = null;
+            waitPrevSlot = -1;
+            restoreSlot = -1;
         }
 
         private static boolean shielded(Player t) {
@@ -98,104 +96,99 @@ public class StunSlamClient implements ClientModInitializer {
             if (me == null || player != me || mc.gameMode == null) return InteractionResult.PASS;
             if (hand != InteractionHand.MAIN_HAND) return InteractionResult.PASS;
             if (!(entity instanceof Player t) || t == me) return InteractionResult.PASS;
-
-            // combo already running: swallow extra clicks so they don't hit with the wrong item
-            if (step != 0) return InteractionResult.FAIL;
-
             if (!shieldBreak) return InteractionResult.PASS;
             if (!shielded(t)) return InteractionResult.PASS;
 
             int axeSlot = findHotbar(me, true);
             if (axeSlot == -1) return InteractionResult.PASS;
             int maceSlot = findHotbar(me, false);
+            int prev = me.getInventory().getSelectedSlot();
+            boolean falling = canSlam(me);
 
-            prevSlot = me.getInventory().getSelectedSlot();
-            wasFalling = canSlam(me);   // remember if we were falling at the moment of the click
+            log("click on shield: fall=" + String.format("%.2f", me.fallDistance)
+                    + " axeSlot=" + axeSlot + " maceSlot=" + maceSlot + " prev=" + prev
+                    + " falling=" + falling);
 
-            // 1) axe hit right now
-            select(me, axeSlot);
             busy = true;
             try {
+                // 1) axe hit breaks the shield
+                select(me, axeSlot);
                 attack(mc, me, t);
+
+                if (stunSlam && maceSlot != -1) {
+                    // 2) swap to the mace
+                    select(me, maceSlot);
+
+                    if (falling) {
+                        // 3) slam in the same tick
+                        attack(mc, me, t);
+                        restoreSlot = prev;
+                        log("slam sent");
+                    } else {
+                        // not falling yet: hold the mace and slam as soon as we are
+                        waitTarget = t;
+                        waitPrevSlot = prev;
+                        waitTicks = MAX_WAIT;
+                        log("axe hit, waiting to fall");
+                    }
+                } else {
+                    select(me, prev);
+                }
             } finally {
                 busy = false;
             }
-
-            target = t;
-            timeout = MAX_TICKS;
-            wait = AXE_HOLD;
-            step = (stunSlam && maceSlot != -1) ? 1 : 3;
 
             // cancel the original click so it doesn't hit the shield with the mace
             return InteractionResult.FAIL;
         }
 
-        // ---- the follow-up runs on the next tick ----
+        // ---- per-tick: restore slot, or slam once we are falling far enough ----
         static void tick(Minecraft mc) {
             LocalPlayer me = mc.player;
             if (me == null || mc.level == null || mc.gameMode == null || !enabled || mc.screen != null) {
-                if (step != 0) reset();
-                return;
-            }
-            if (step == 0) return;
-
-            if (--timeout <= 0) {
-                reset();
+                clear();
                 return;
             }
 
-            if (wait > 0) {
-                wait--;
-                return;
+            if (restoreSlot != -1) {
+                select(me, restoreSlot);
+                restoreSlot = -1;
             }
 
-            if (step == 3) {
-                select(me, prevSlot);
-                reset();
-                return;
-            }
+            if (waitTicks <= 0) return;
 
-            Player t = target;
+            waitTicks--;
+            Player t = waitTarget;
             if (t == null || !t.isAlive() || me.distanceToSqr(t) > 36.0) {
-                reset();
+                waitTicks = 0;
+                waitTarget = null;
+                log("wait cancelled (target gone)");
                 return;
             }
 
-            if (step == 1) {
+            if (canSlam(me)) {
                 int maceSlot = findHotbar(me, false);
-                if (maceSlot == -1) {
-                    reset();
-                    return;
+                if (maceSlot != -1) {
+                    busy = true;
+                    try {
+                        select(me, maceSlot);
+                        attack(mc, me, t);
+                    } finally {
+                        busy = false;
+                    }
+                    log("delayed slam sent, fall=" + String.format("%.2f", me.fallDistance));
+                    restoreSlot = waitPrevSlot;
                 }
-                // 2) swap to mace and 3) slam in the same tick (swap packet goes out first)
-                select(me, maceSlot);
-                if (wasFalling || canSlam(me)) {
-                    slam(mc, me, t);
-                    reset();
-                } else {
-                    step = 2; // not falling yet: hold the mace and wait
-                }
-                return;
-            }
-
-            if (step == 2) {
-                if (!canSlam(me)) return;
-                slam(mc, me, t);
-                reset();
-            }
-        }
-
-        private static void slam(Minecraft mc, LocalPlayer me, Player t) {
-            busy = true;
-            try {
-                attack(mc, me, t);
-            } finally {
-                busy = false;
+                waitTicks = 0;
+                waitTarget = null;
+            } else if (waitTicks == 0) {
+                log("wait expired, never fell far enough");
+                waitTarget = null;
             }
         }
 
         private static void select(LocalPlayer me, int slot) {
-            if (me.getInventory().getSelectedSlot() != slot) {
+            if (slot >= 0 && me.getInventory().getSelectedSlot() != slot) {
                 me.getInventory().setSelectedSlot(slot);
             }
         }
