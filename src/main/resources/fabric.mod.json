@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "stunslam",
+  "version": "${version}",
+  "name": "StunSlam Helper",
+  "description": "Press Keypad 5 to open a GUI that toggles automatic shield breaking and stun slamming.",
+  "authors": ["you"],
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.example.stunslam.StunSlamClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
