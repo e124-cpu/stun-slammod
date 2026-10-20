@@ -50,16 +50,15 @@ public class StunSlamClient implements ClientModInitializer {
     }
 
     // ------------------------------------------------------------------
-    // Logic: click on a shield -> axe hit -> back to mace -> slam
+    // Logic: click on a shield -> axe hit -> mace swap -> slam (same tick)
     // ------------------------------------------------------------------
     static final class StunSlamLogic {
         private static final float MIN_FALL = 1.5f;
-        private static final int GAP = 1; // ticks between steps
+        private static final int RETRY_TICKS = 20;
 
         private static boolean wasDown = false;
-        private static int step = 0;       // 0 idle, 1 swap to mace, 2 mace attack
-        private static int wait = 0;
-        private static Player comboTarget = null;
+        private static int pending = 0;          // ticks left to wait for a valid slam
+        private static Player pendingTarget = null;
 
         private StunSlamLogic() {}
 
@@ -73,10 +72,14 @@ public class StunSlamClient implements ClientModInitializer {
             return t.isUsingItem() && t.getUseItem().is(Items.SHIELD);
         }
 
+        private static boolean canSlam(LocalPlayer me) {
+            return !requireFall || me.fallDistance > MIN_FALL;
+        }
+
         static void tick(Minecraft mc) {
             LocalPlayer me = mc.player;
             if (me == null || mc.level == null || mc.gameMode == null) {
-                step = 0;
+                pending = 0;
                 wasDown = false;
                 return;
             }
@@ -86,49 +89,36 @@ public class StunSlamClient implements ClientModInitializer {
             wasDown = down;
 
             if (!enabled || mc.screen != null) {
-                step = 0;
+                pending = 0;
                 return;
             }
 
-            // ---- follow-up steps (swap back to mace, then slam) ----
-            if (step != 0) {
-                if (wait > 0) {
-                    wait--;
-                    return;
-                }
-                if (step == 1) {
+            // ---- waiting to fall far enough for the slam ----
+            if (pending > 0) {
+                pending--;
+                Player t = pendingTarget;
+                if (t == null || !t.isAlive() || me.distanceToSqr(t) > 36.0) {
+                    pending = 0;
+                    pendingTarget = null;
+                    say(me, "Combo cancelled (target gone)");
+                } else if (canSlam(me)) {
                     int maceSlot = findHotbar(me, false);
-                    if (maceSlot == -1) {
-                        say(me, "No mace in hotbar");
-                        step = 0;
-                        return;
+                    if (maceSlot != -1) {
+                        select(me, maceSlot);
+                        attack(mc, me, t);
+                        say(me, "SLAM! (fall " + String.format("%.1f", me.fallDistance) + ")");
                     }
-                    select(me, maceSlot);
-                    say(me, "Swapped to mace");
-                    step = 2;
-                    wait = GAP;
-                    return;
+                    pending = 0;
+                    pendingTarget = null;
+                } else if (pending == 0) {
+                    say(me, "Slam expired, not falling enough");
+                    pendingTarget = null;
                 }
-                if (step == 2) {
-                    step = 0;
-                    Player t = comboTarget;
-                    comboTarget = null;
-                    if (t == null || !t.isAlive()) {
-                        say(me, "Target gone");
-                        return;
-                    }
-                    if (requireFall && me.fallDistance <= MIN_FALL) {
-                        say(me, "Not falling enough (" + String.format("%.1f", me.fallDistance) + " blocks)");
-                        return;
-                    }
-                    if (me.distanceToSqr(t) > 36.0) {
-                        say(me, "Target out of reach");
-                        return;
-                    }
-                    attack(mc, me, t);
-                    say(me, "SLAM! (fall " + String.format("%.1f", me.fallDistance) + ")");
-                    return;
+                // keep eating clicks so the mace doesn't hit the broken shield early
+                if (pending > 0) {
+                    while (mc.options.keyAttack.consumeClick()) { }
                 }
+                return;
             }
 
             // ---- trigger: you clicked while looking at a shielded player ----
@@ -151,16 +141,28 @@ public class StunSlamClient implements ClientModInitializer {
             while (mc.options.keyAttack.consumeClick()) { }
 
             int prevSlot = me.getInventory().getSelectedSlot();
+
+            // 1) axe hit
             select(me, axeSlot);
             attack(mc, me, target);
-            say(me, "Axe hit on shield");
 
-            if (stunSlam && maceSlot != -1) {
-                comboTarget = target;
-                step = 1;
-                wait = GAP;
-            } else {
+            if (!(stunSlam && maceSlot != -1)) {
                 select(me, prevSlot);
+                say(me, "Axe hit on shield");
+                return;
+            }
+
+            // 2) back to mace
+            select(me, maceSlot);
+
+            // 3) slam right now if we are falling, otherwise wait for it
+            if (canSlam(me)) {
+                attack(mc, me, target);
+                say(me, "SLAM! (fall " + String.format("%.1f", me.fallDistance) + ")");
+            } else {
+                pendingTarget = target;
+                pending = RETRY_TICKS;
+                say(me, "Axe hit, waiting to fall (" + String.format("%.1f", me.fallDistance) + " blocks)");
             }
         }
 
