@@ -26,6 +26,7 @@ public class StunSlamClient implements ClientModInitializer {
     public static boolean shieldBreak = true;
     public static boolean stunSlam = true;
     public static boolean requireFall = true;
+    public static boolean debug = true;
 
     private static KeyMapping openGui;
 
@@ -37,73 +38,129 @@ public class StunSlamClient implements ClientModInitializer {
                 GLFW.GLFW_KEY_KP_5,
                 KeyMapping.Category.MISC));
 
-        ClientTickEvents.END_CLIENT_TICK.register(mc -> {
+        // START of tick so we can intercept your click before vanilla attacks
+        ClientTickEvents.START_CLIENT_TICK.register(mc -> {
             while (openGui.consumeClick()) {
                 if (mc.screen == null) {
                     mc.setScreen(new StunSlamScreen());
                 }
             }
-            if (enabled) {
-                StunSlamLogic.tick(mc);
-            } else {
-                StunSlamLogic.reset();
-            }
+            StunSlamLogic.tick(mc);
         });
     }
 
     // ------------------------------------------------------------------
-    // Logic: axe breaks the shield, then mace smashes
+    // Logic: click on a shield -> axe hit -> back to mace -> slam
     // ------------------------------------------------------------------
     static final class StunSlamLogic {
         private static final float MIN_FALL = 1.5f;
-        private static final float AXE_READY = 0.95f;
-        private static final int MACE_WINDOW = 40;
+        private static final int GAP = 1; // ticks between steps
 
-        private static int maceWindow = 0;
+        private static boolean wasDown = false;
+        private static int step = 0;       // 0 idle, 1 swap to mace, 2 mace attack
+        private static int wait = 0;
+        private static Player comboTarget = null;
 
         private StunSlamLogic() {}
 
-        static void reset() {
-            maceWindow = 0;
+        private static void say(LocalPlayer me, String msg) {
+            if (debug) {
+                me.displayClientMessage(Component.literal("[StunSlam] " + msg), true);
+            }
+        }
+
+        private static boolean shielded(Player t) {
+            return t.isUsingItem() && t.getUseItem().is(Items.SHIELD);
         }
 
         static void tick(Minecraft mc) {
             LocalPlayer me = mc.player;
             if (me == null || mc.level == null || mc.gameMode == null) {
-                maceWindow = 0;
+                step = 0;
+                wasDown = false;
                 return;
             }
-            if (mc.screen != null) return;
 
-            if (maceWindow > 0) maceWindow--;
+            boolean down = mc.options.keyAttack.isDown();
+            boolean pressed = down && !wasDown;
+            wasDown = down;
+
+            if (!enabled || mc.screen != null) {
+                step = 0;
+                return;
+            }
+
+            // ---- follow-up steps (swap back to mace, then slam) ----
+            if (step != 0) {
+                if (wait > 0) {
+                    wait--;
+                    return;
+                }
+                if (step == 1) {
+                    int maceSlot = findHotbar(me, false);
+                    if (maceSlot == -1) {
+                        say(me, "No mace in hotbar");
+                        step = 0;
+                        return;
+                    }
+                    select(me, maceSlot);
+                    say(me, "Swapped to mace");
+                    step = 2;
+                    wait = GAP;
+                    return;
+                }
+                if (step == 2) {
+                    step = 0;
+                    Player t = comboTarget;
+                    comboTarget = null;
+                    if (t == null || !t.isAlive()) {
+                        say(me, "Target gone");
+                        return;
+                    }
+                    if (requireFall && me.fallDistance <= MIN_FALL) {
+                        say(me, "Not falling enough (" + String.format("%.1f", me.fallDistance) + " blocks)");
+                        return;
+                    }
+                    if (me.distanceToSqr(t) > 36.0) {
+                        say(me, "Target out of reach");
+                        return;
+                    }
+                    attack(mc, me, t);
+                    say(me, "SLAM! (fall " + String.format("%.1f", me.fallDistance) + ")");
+                    return;
+                }
+            }
+
+            // ---- trigger: you clicked while looking at a shielded player ----
+            if (!pressed) return;
 
             HitResult hit = mc.hitResult;
             if (!(hit instanceof EntityHitResult ehr)) return;
             if (!(ehr.getEntity() instanceof Player target)) return;
-            if (target == me || !target.isAlive()) return;
+            if (target == me || !target.isAlive() || !shielded(target)) return;
+            if (!shieldBreak) return;
 
             int axeSlot = findHotbar(me, true);
-            int maceSlot = findHotbar(me, false);
-
-            // Step 2: mace follow-up after the axe hit
-            if (maceWindow > 0 && maceSlot != -1) {
-                select(me, maceSlot);
-                if (!requireFall || me.fallDistance > MIN_FALL) {
-                    attack(mc, me, target);
-                    maceWindow = 0;
-                }
+            if (axeSlot == -1) {
+                say(me, "No axe in hotbar");
                 return;
             }
+            int maceSlot = findHotbar(me, false);
 
-            // Step 1: shield is up -> axe it
-            if (shieldBreak && target.isBlocking() && axeSlot != -1) {
-                select(me, axeSlot);
-                if (me.getAttackStrengthScale(0.0f) >= AXE_READY) {
-                    attack(mc, me, target);
-                    if (stunSlam && maceSlot != -1) {
-                        maceWindow = MACE_WINDOW;
-                    }
-                }
+            // eat your click so the mace doesn't hit the shield
+            while (mc.options.keyAttack.consumeClick()) { }
+
+            int prevSlot = me.getInventory().getSelectedSlot();
+            select(me, axeSlot);
+            attack(mc, me, target);
+            say(me, "Axe hit on shield");
+
+            if (stunSlam && maceSlot != -1) {
+                comboTarget = target;
+                step = 1;
+                wait = GAP;
+            } else {
+                select(me, prevSlot);
             }
         }
 
@@ -131,7 +188,7 @@ public class StunSlamClient implements ClientModInitializer {
     // GUI
     // ------------------------------------------------------------------
     static class StunSlamScreen extends Screen {
-        private static final int PW = 230, PH = 180;
+        private static final int PW = 230, PH = 206;
 
         StunSlamScreen() {
             super(Component.literal("StunSlam Helper"));
@@ -156,14 +213,14 @@ public class StunSlamClient implements ClientModInitializer {
                 b.setMessage(state("Automation", enabled));
             }).bounds(left, top + 42, 200, 24).build());
 
-            addRenderableWidget(Button.builder(state("Shield Break", shieldBreak), b -> {
+            addRenderableWidget(Button.builder(state("Shield Break (axe)", shieldBreak), b -> {
                 shieldBreak = !shieldBreak;
-                b.setMessage(state("Shield Break", shieldBreak));
+                b.setMessage(state("Shield Break (axe)", shieldBreak));
             }).bounds(left, top + 74, 200, 20).build());
 
-            addRenderableWidget(Button.builder(state("Stun Slam (mace follow-up)", stunSlam), b -> {
+            addRenderableWidget(Button.builder(state("Stun Slam (mace)", stunSlam), b -> {
                 stunSlam = !stunSlam;
-                b.setMessage(state("Stun Slam (mace follow-up)", stunSlam));
+                b.setMessage(state("Stun Slam (mace)", stunSlam));
             }).bounds(left, top + 98, 200, 20).build());
 
             addRenderableWidget(Button.builder(state("Require Falling", requireFall), b -> {
@@ -171,8 +228,13 @@ public class StunSlamClient implements ClientModInitializer {
                 b.setMessage(state("Require Falling", requireFall));
             }).bounds(left, top + 122, 200, 20).build());
 
+            addRenderableWidget(Button.builder(state("Debug Messages", debug), b -> {
+                debug = !debug;
+                b.setMessage(state("Debug Messages", debug));
+            }).bounds(left, top + 146, 200, 20).build());
+
             addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose())
-                    .bounds(left, top + 150, 200, 20).build());
+                    .bounds(left, top + 176, 200, 20).build());
         }
 
         @Override
@@ -194,7 +256,7 @@ public class StunSlamClient implements ClientModInitializer {
                     Component.literal("StunSlam Helper").withStyle(ChatFormatting.BOLD),
                     cx, y + 10, 0xFFFFFFFF);
             g.drawCenteredString(this.font,
-                    Component.literal("Axe breaks shield, then mace smashes"),
+                    Component.literal("Click a shield: axe, then mace"),
                     cx, y + 32, 0xFF9A9AB0);
         }
 
