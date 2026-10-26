@@ -1,0 +1,165 @@
+// ===== FILE: src/main/java/com/example/lockspvp/HiddenKeys.java =====
+package com.example.lockspvp;
+
+import java.util.Set;
+
+public class HiddenKeys {
+    public static final Set<String> HIDDEN = Set.of(
+        "key.attack",
+        "key.use"
+    );
+
+    public static boolean showHidden = false;
+    public static double savedScroll = 0;
+}
+
+
+// ===== FILE: src/main/java/com/example/lockspvp/mixin/KeyEntryAccessor.java =====
+package com.example.lockspvp.mixin;
+
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.gui.screens.controls.KeyBindsList;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.gen.Accessor;
+
+@Mixin(KeyBindsList.KeyEntry.class)
+public interface KeyEntryAccessor {
+    @Accessor("key")
+    KeyMapping getKey();
+}
+
+
+// ===== FILE: src/main/java/com/example/lockspvp/mixin/KeyBindsListMixin.java =====
+package com.example.lockspvp.mixin;
+
+import com.example.lockspvp.HiddenKeys;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.controls.KeyBindsList;
+import net.minecraft.client.gui.screens.controls.KeyBindsScreen;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.List;
+
+@Mixin(KeyBindsList.class)
+public abstract class KeyBindsListMixin {
+
+    @Inject(method = "<init>", at = @At("TAIL"))
+    private void lockspvp$filter(KeyBindsScreen screen, Minecraft mc, CallbackInfo ci) {
+        if (HiddenKeys.showHidden) return;
+
+        KeyBindsList self = (KeyBindsList) (Object) this;
+        List<KeyBindsList.Entry> children = self.children();
+
+        children.removeIf(entry ->
+            entry instanceof KeyBindsList.KeyEntry ke
+            && HiddenKeys.HIDDEN.contains(((KeyEntryAccessor) ke).getKey().getName())
+        );
+
+        for (int i = children.size() - 1; i >= 0; i--) {
+            if (children.get(i) instanceof KeyBindsList.CategoryEntry) {
+                boolean last = i == children.size() - 1;
+                boolean nextIsCategory = !last && children.get(i + 1) instanceof KeyBindsList.CategoryEntry;
+                if (last || nextIsCategory) {
+                    children.remove(i);
+                }
+            }
+        }
+    }
+}
+
+
+// ===== FILE: src/main/java/com/example/lockspvp/mixin/KeyBindsScreenMixin.java =====
+package com.example.lockspvp.mixin;
+
+import com.example.lockspvp.HiddenKeys;
+import net.minecraft.client.Options;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.controls.KeyBindsList;
+import net.minecraft.client.gui.screens.controls.KeyBindsScreen;
+import net.minecraft.network.chat.Component;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(KeyBindsScreen.class)
+public abstract class KeyBindsScreenMixin extends Screen {
+
+    protected KeyBindsScreenMixin(Component title) {
+        super(title);
+    }
+
+    @Shadow
+    private KeyBindsList keyBindsList;
+
+    @Inject(method = "<init>", at = @At("TAIL"))
+    private void lockspvp$reset(Screen parent, Options options, CallbackInfo ci) {
+        HiddenKeys.showHidden = false;
+        HiddenKeys.savedScroll = 0;
+    }
+
+    @Inject(method = "init", at = @At("TAIL"))
+    private void lockspvp$addLock(CallbackInfo ci) {
+        boolean shown = HiddenKeys.showHidden;
+
+        if (this.keyBindsList != null) {
+            this.keyBindsList.setScrollAmount(HiddenKeys.savedScroll);
+        }
+
+        this.addRenderableWidget(
+            Button.builder(Component.literal(shown ? "U" : "L"), b -> {
+                if (this.keyBindsList != null) {
+                    HiddenKeys.savedScroll = this.keyBindsList.getScrollAmount();
+                }
+                HiddenKeys.showHidden = !HiddenKeys.showHidden;
+                this.rebuildWidgets();
+            })
+            .bounds(this.width - 28, 6, 20, 20)
+            .tooltip(Tooltip.create(Component.literal(
+                shown ? "Hide hidden keybinds" : "Show hidden keybinds")))
+            .build()
+        );
+    }
+}
+
+
+// ===== FILE: src/main/resources/lockspvp.mixins.json =====
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.lockspvp.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "KeyEntryAccessor",
+    "KeyBindsListMixin",
+    "KeyBindsScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+
+
+// ===== FILE: src/main/resources/fabric.mod.json =====
+{
+  "schemaVersion": 1,
+  "id": "lockspvp",
+  "version": "1.0.0",
+  "name": "LOCKSPVP",
+  "description": "LOCKSPVP: hide keybinds in the controls menu, with a lock button to reveal them.",
+  "environment": "client",
+  "mixins": [
+    "lockspvp.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.14.0",
+    "minecraft": "1.20.1",
+    "java": ">=17"
+  }
+}
